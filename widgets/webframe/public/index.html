@@ -120,9 +120,14 @@
 
         // Load and process the main page
         async function loadPage() {
+          await loadPageFromUrl(url);
+        }
+
+        // Reusable function to load a page from any URL
+        async function loadPageFromUrl(pageUrl) {
           try {
             updateStatus('Fetching page...');
-            const result = await proxyRequest(url);
+            const result = await proxyRequest(pageUrl);
             
             updateStatus('Processing HTML...');
             console.log('Content type:', result.contentType);
@@ -138,11 +143,8 @@
             }
             
             // Process HTML by injecting proxy script
-            const processed = injectProxyIntoHtml(htmlContent, url);
+            const processed = injectProxyIntoHtml(htmlContent, pageUrl);
             console.log('Processed HTML length:', processed.length);
-            console.log('Original HTML had <head> at:', htmlContent.indexOf('<head>'));
-            console.log('Processed HTML has early script at:', processed.indexOf('Early intercept script'));
-            console.log('First 2000 chars of processed:', processed.substring(0, 2000));
             
             updateStatus('Loading into frame...');
             
@@ -174,6 +176,23 @@
         function showError(msg) {
           document.body.innerHTML = '<div class="error">' + msg + '</div>';
         }
+
+        // Expose navigation function for iframe to call directly
+        window.handleProxyNavigation = async function(targetUrl) {
+          console.log('Handling navigation to:', targetUrl);
+          // Show loading state
+          loading.style.display = 'flex';
+          iframe.style.display = 'none';
+          updateStatus('Loading...');
+          
+          // Load the new page
+          try {
+            await loadPageFromUrl(targetUrl);
+          } catch (error) {
+            console.error('Navigation failed:', error);
+            showError('Failed to navigate: ' + error.message);
+          }
+        };
 
         // Scan iframe for external scripts and load them through proxy
         async function scanAndLoadScripts() {
@@ -370,6 +389,44 @@
                 });
               };
               
+              // Intercept link clicks
+              document.addEventListener('click', function(e) {
+                // Find the closest anchor tag
+                let target = e.target;
+                while (target && target.tagName !== 'A') {
+                  target = target.parentElement;
+                }
+                
+                if (!target) return;
+                
+                const href = target.getAttribute('href');
+                if (!href || href.startsWith('#') || href.startsWith('javascript:') || 
+                    href.startsWith('mailto:') || href.startsWith('tel:')) {
+                  return; // Let these navigate normally
+                }
+                
+                // Check if it's a same-origin link
+                try {
+                  const linkUrl = new URL(href, baseUrl);
+                  const baseUrlObj = new URL(baseUrl);
+                  
+                  // Only intercept same-origin links
+                  if (linkUrl.origin === baseUrlObj.origin) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const urlString = linkUrl.href;
+                    console.log('Intercepted link click:', urlString);
+                    
+                    // Call parent function directly instead of postMessage
+                    if (window.parent && window.parent.handleProxyNavigation) {
+                      window.parent.handleProxyNavigation(urlString);
+                    }
+                  }
+                } catch (err) {
+                  console.error('Failed to process link:', href, err);
+                }
+              }, true); // Use capture phase to catch it early
+              
               // Function to initialize resource loading
               function initResourceLoading() {
                 console.log('Initializing resource loading');
@@ -452,7 +509,7 @@
           }
         }
 
-        // Handle messages from iframe (only for fetch requests now)
+        // Handle messages from iframe (only for fetch requests)
         window.addEventListener('message', async function(event) {
           if (event.data.type === 'proxy-fetch') {
             console.log('Handling proxy-fetch:', event.data.url);
