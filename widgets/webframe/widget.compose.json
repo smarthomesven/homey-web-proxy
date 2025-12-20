@@ -1,0 +1,21 @@
+{
+  "name": {
+    "en": "Web frame",
+    "nl": "Webkader"
+  },
+  "settings": [
+    {
+      "id": "url",
+      "type": "text",
+      "title": {
+        "en": "URL"
+      }
+    }
+  ],
+  "api": {
+    "webRequest": {
+      "method": "POST",
+      "path": "/request"
+    }
+  }
+}

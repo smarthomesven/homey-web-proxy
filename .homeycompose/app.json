@@ -1,0 +1,35 @@
+{
+  "id": "nl.dypodex.proxy",
+  "version": "1.0.0",
+  "compatibility": ">=12.4.0",
+  "sdk": 3,
+  "platforms": [
+    "local"
+  ],
+  "name": {
+    "en": "Web Proxy",
+    "nl": "Web Proxy"
+  },
+  "description": {
+    "en": "Remotely access devices on your LAN",
+    "nl": "Toegang op afstand tot je LAN-apparaten"
+  },
+  "category": [
+    "tools"
+  ],
+  "source": "https://github.com/smarthomesven/homey-web-proxy",
+  "bugs": {
+    "url": "https://github.com/smarthomesven/homey-web-proxy/issues"
+  },
+  "brandColor": "#0CC0DF",
+  "permissions": [],
+  "images": {
+    "small": "/assets/images/small.png",
+    "large": "/assets/images/large.png",
+    "xlarge": "/assets/images/xlarge.png"
+  },
+  "author": {
+    "name": "Sven Serlier",
+    "email": "sven@dypodex.com"
+  }
+}

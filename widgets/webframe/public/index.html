@@ -1,0 +1,496 @@
+<html>
+  <head>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+      }
+      
+      #proxy-iframe {
+        width: 100%;
+        height: 100vh;
+        border: none;
+      }
+      
+      .loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        height: 100vh;
+        font-family: sans-serif;
+        color: #666;
+      }
+      
+      .loading-text {
+        margin-top: 10px;
+        font-size: 14px;
+      }
+      
+      .error {
+        padding: 20px;
+        color: #d32f2f;
+        font-family: sans-serif;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+
+  <body class="homey-widget">
+    <div class="loading">
+      <div>Loading...</div>
+      <div class="loading-text" id="status"></div>
+    </div>
+    <iframe id="proxy-iframe" style="display: none;" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
+    
+    <script type="text/javascript">
+      function onHomeyReady(Homey) {
+        Homey.ready();
+
+        const url = Homey.getSettings().url;
+        if (!url) {
+          document.body.innerHTML = '<div class="error">Please configure a URL in the widget settings</div>';
+          return;
+        }
+
+        const iframe = document.getElementById('proxy-iframe');
+        const loading = document.querySelector('.loading');
+        const statusEl = document.getElementById('status');
+        
+        function updateStatus(msg) {
+          console.log(msg);
+          statusEl.textContent = msg;
+        }
+
+        // Proxy function to make requests through Homey API
+        async function proxyRequest(requestUrl, method = 'GET', headers = {}, data = null) {
+          console.log('Making proxy request to:', requestUrl);
+          
+          try {
+            const result = await Homey.api("POST", "/request", {
+              url: requestUrl,
+              method: method,
+              headers: headers,
+              data: data
+            });
+            
+            console.log('Received response:', {
+              success: result.success,
+              status: result.status,
+              contentType: result.contentType,
+              dataLength: result.data ? result.data.length : 0
+            });
+            
+            if (result.success === false) {
+              throw new Error(result.error || 'Request failed');
+            }
+            
+            return result;
+          } catch (err) {
+            console.error('Homey API error:', err);
+            throw err;
+          }
+        }
+
+        // Convert relative URLs to absolute
+        function makeAbsoluteUrl(baseUrl, relativeUrl) {
+          try {
+            return new URL(relativeUrl, baseUrl).href;
+          } catch (e) {
+            console.error('Failed to make absolute URL:', e);
+            return relativeUrl;
+          }
+        }
+
+        // Better base64 decode that handles Unicode
+        function base64DecodeUnicode(base64) {
+          try {
+            const binaryString = atob(base64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+            return new TextDecoder('utf-8').decode(bytes);
+          } catch (e) {
+            console.error('Failed to decode base64:', e);
+            return atob(base64);
+          }
+        }
+
+        // Load and process the main page
+        async function loadPage() {
+          try {
+            updateStatus('Fetching page...');
+            const result = await proxyRequest(url);
+            
+            updateStatus('Processing HTML...');
+            console.log('Content type:', result.contentType);
+            
+            // Decode base64 response
+            let htmlContent;
+            try {
+              htmlContent = base64DecodeUnicode(result.data);
+              console.log('Decoded HTML length:', htmlContent.length);
+            } catch (decodeError) {
+              console.error('Decode error:', decodeError);
+              throw new Error('Failed to decode response: ' + decodeError.message);
+            }
+            
+            // Process HTML by injecting proxy script
+            const processed = injectProxyIntoHtml(htmlContent, url);
+            console.log('Processed HTML length:', processed.length);
+            console.log('Original HTML had <head> at:', htmlContent.indexOf('<head>'));
+            console.log('Processed HTML has early script at:', processed.indexOf('Early intercept script'));
+            console.log('First 2000 chars of processed:', processed.substring(0, 2000));
+            
+            updateStatus('Loading into frame...');
+            
+            // Create srcdoc content
+            iframe.srcdoc = processed;
+            
+            // Wait a bit for content to load
+            setTimeout(() => {
+              loading.style.display = 'none';
+              iframe.style.display = 'block';
+              updateStatus('Ready');
+              
+              // Scan iframe for external scripts and load them
+              scanAndLoadScripts();
+              
+              // Also scan and load stylesheets
+              scanAndLoadStylesheets();
+              
+              // And load images
+              scanAndLoadImages();
+            }, 500);
+            
+          } catch (error) {
+            console.error('Failed to load page:', error);
+            showError('Failed to load page: ' + error.message + '\n\nCheck console for details.');
+          }
+        }
+
+        function showError(msg) {
+          document.body.innerHTML = '<div class="error">' + msg + '</div>';
+        }
+
+        // Scan iframe for external scripts and load them through proxy
+        async function scanAndLoadScripts() {
+          try {
+            if (!iframe.contentDocument) {
+              console.error('Cannot access iframe content');
+              return;
+            }
+            
+            // Find all script elements with data-original-src attribute
+            const scripts = iframe.contentDocument.querySelectorAll('script[data-original-src]');
+            console.log('Found', scripts.length, 'scripts to load from parent');
+            
+            for (let i = 0; i < scripts.length; i++) {
+              const script = scripts[i];
+              const scriptUrl = script.getAttribute('data-original-src');
+              
+              if (!scriptUrl) continue;
+              
+              console.log('Loading script from parent:', scriptUrl);
+              
+              try {
+                const result = await proxyRequest(scriptUrl);
+                const jsContent = base64DecodeUnicode(result.data);
+                
+                // Create new script element
+                const newScript = iframe.contentDocument.createElement('script');
+                newScript.textContent = jsContent;
+                
+                // Replace the original script element
+                if (script.parentNode) {
+                  script.parentNode.replaceChild(newScript, script);
+                  console.log('Inserted script:', scriptUrl);
+                }
+              } catch (error) {
+                console.error('Failed to load script:', scriptUrl, error);
+              }
+            }
+            
+            console.log('Finished loading external scripts');
+          } catch (error) {
+            console.error('Error in scanAndLoadScripts:', error);
+          }
+        }
+
+        // Scan iframe for stylesheets and load them through proxy
+        async function scanAndLoadStylesheets() {
+          try {
+            if (!iframe.contentDocument) {
+              console.error('Cannot access iframe content');
+              return;
+            }
+            
+            // Find all link elements with data-original-href attribute
+            const links = iframe.contentDocument.querySelectorAll('link[data-original-href]');
+            console.log('Found', links.length, 'stylesheets to load from parent');
+            
+            for (let i = 0; i < links.length; i++) {
+              const link = links[i];
+              const cssUrl = link.getAttribute('data-original-href');
+              
+              if (!cssUrl) continue;
+              
+              console.log('Loading stylesheet from parent:', cssUrl);
+              
+              try {
+                const result = await proxyRequest(cssUrl);
+                const cssContent = base64DecodeUnicode(result.data);
+                
+                // Create style element
+                const style = iframe.contentDocument.createElement('style');
+                style.textContent = cssContent;
+                
+                // Insert after the link element
+                if (link.parentNode) {
+                  link.parentNode.insertBefore(style, link.nextSibling);
+                  console.log('Inserted stylesheet:', cssUrl);
+                }
+              } catch (error) {
+                console.error('Failed to load stylesheet:', cssUrl, error);
+              }
+            }
+            
+            console.log('Finished loading stylesheets');
+          } catch (error) {
+            console.error('Error in scanAndLoadStylesheets:', error);
+          }
+        }
+
+        // Scan iframe for images and load them through proxy
+        async function scanAndLoadImages() {
+          try {
+            if (!iframe.contentDocument) {
+              console.error('Cannot access iframe content');
+              return;
+            }
+            
+            // Find all img elements with data-original-src attribute
+            const images = iframe.contentDocument.querySelectorAll('img[data-original-src]');
+            console.log('Found', images.length, 'images to load from parent');
+            
+            for (let i = 0; i < images.length; i++) {
+              const img = images[i];
+              const imgUrl = img.getAttribute('data-original-src');
+              
+              if (!imgUrl) continue;
+              
+              console.log('Loading image from parent:', imgUrl);
+              
+              try {
+                const result = await proxyRequest(imgUrl);
+                const contentType = result.contentType || 'image/png';
+                
+                // Set image src to data URL
+                img.src = `data:${contentType};base64,${result.data}`;
+                console.log('Loaded image:', imgUrl);
+              } catch (error) {
+                console.error('Failed to load image:', imgUrl, error);
+              }
+            }
+            
+            console.log('Finished loading images');
+          } catch (error) {
+            console.error('Error in scanAndLoadImages:', error);
+          }
+        }
+
+        // Inject proxy script into HTML using string manipulation
+        function injectProxyIntoHtml(html, baseUrl) {
+          // Create the proxy script
+          const proxyScript = `
+            <script>
+            (function() {
+              console.log('Proxy script initializing...');
+              const baseUrl = '${baseUrl.replace(/'/g, "\\'")}';
+              
+              // Override fetch to proxy through parent
+              const originalFetch = window.fetch;
+              window.fetch = function(resource, init = {}) {
+                const url = typeof resource === 'string' ? resource : resource.url;
+                let absoluteUrl;
+                try {
+                  absoluteUrl = new URL(url, baseUrl).href;
+                } catch (e) {
+                  absoluteUrl = url;
+                }
+                
+                console.log('Proxying fetch:', absoluteUrl);
+                
+                return new Promise((resolve, reject) => {
+                  const messageId = Math.random().toString(36);
+                  
+                  window.parent.postMessage({
+                    type: 'proxy-fetch',
+                    id: messageId,
+                    url: absoluteUrl,
+                    method: init.method || 'GET',
+                    headers: init.headers || {},
+                    body: init.body
+                  }, '*');
+                  
+                  const handler = function(event) {
+                    if (event.data.type === 'proxy-fetch-response' && event.data.id === messageId) {
+                      window.removeEventListener('message', handler);
+                      
+                      if (event.data.error) {
+                        reject(new Error(event.data.error));
+                      } else {
+                        try {
+                          const binaryString = atob(event.data.data);
+                          const bytes = new Uint8Array(binaryString.length);
+                          for (let i = 0; i < binaryString.length; i++) {
+                            bytes[i] = binaryString.charCodeAt(i);
+                          }
+                          const blob = new Blob([bytes], { type: event.data.contentType });
+                          
+                          resolve(new Response(blob, {
+                            status: event.data.status,
+                            statusText: event.data.statusText,
+                            headers: event.data.headers
+                          }));
+                        } catch (e) {
+                          reject(e);
+                        }
+                      }
+                    }
+                  };
+                  
+                  window.addEventListener('message', handler);
+                  setTimeout(() => {
+                    window.removeEventListener('message', handler);
+                    reject(new Error('Request timeout'));
+                  }, 30000);
+                });
+              };
+              
+              // Function to initialize resource loading
+              function initResourceLoading() {
+                console.log('Initializing resource loading');
+                
+                // Rewrite image sources - just mark them for loading
+                document.querySelectorAll('img[src]').forEach(img => {
+                  const src = img.getAttribute('src');
+                  if (src && !src.startsWith('data:') && !src.startsWith('blob:')) {
+                    try {
+                      const absoluteUrl = new URL(src, baseUrl).href;
+                      img.setAttribute('data-original-src', absoluteUrl);
+                      img.setAttribute('src', 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg"%3E%3C/svg%3E');
+                      console.log('Marked image for loading:', absoluteUrl);
+                    } catch (e) {
+                      console.error('Failed to process image:', src, e);
+                    }
+                  }
+                });
+                
+                // Rewrite stylesheet links - just mark them, don't try to load via postMessage
+                document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+                  const href = link.getAttribute('href');
+                  if (href && !href.startsWith('data:') && !href.startsWith('blob:')) {
+                    try {
+                      const absoluteUrl = new URL(href, baseUrl).href;
+                      link.setAttribute('data-original-href', absoluteUrl);
+                      link.removeAttribute('href');
+                      console.log('Marked stylesheet for loading:', absoluteUrl);
+                    } catch (e) {
+                      console.error('Failed to process stylesheet:', href, e);
+                    }
+                  }
+                });
+                
+                // Rewrite script sources - just mark them, don't try to load via postMessage
+                const scripts = Array.from(document.querySelectorAll('script[src]'));
+                console.log('Found', scripts.length, 'external scripts');
+                
+                scripts.forEach((script, index) => {
+                  const src = script.getAttribute('src');
+                  if (!src || src.startsWith('data:') || src.startsWith('blob:')) {
+                    return;
+                  }
+                  
+                  try {
+                    const absoluteUrl = new URL(src, baseUrl).href;
+                    
+                    // Mark the script with its URL - parent will load it
+                    script.setAttribute('data-original-src', absoluteUrl);
+                    script.removeAttribute('src');
+                    
+                    console.log('Marked script for loading:', absoluteUrl);
+                  } catch (e) {
+                    console.error('Failed to process script:', src, e);
+                  }
+                });
+                
+                console.log('Resource loading initialized');
+              }
+              
+              // Wait for DOM to be ready
+              if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', initResourceLoading);
+              } else {
+                initResourceLoading();
+              }
+              
+              console.log('Proxy script initialized');
+            })();
+            </` + `script>`;
+          
+          // Try to inject after <head> tag, or before </head>, or at the start of <body>
+          if (html.includes('</head>')) {
+            return html.replace('</head>', proxyScript + '</head>');
+          } else if (html.includes('<body')) {
+            return html.replace(/<body([^>]*)>/, '<body$1>' + proxyScript);
+          } else {
+            // Just prepend to the HTML
+            return proxyScript + html;
+          }
+        }
+
+        // Handle messages from iframe (only for fetch requests now)
+        window.addEventListener('message', async function(event) {
+          if (event.data.type === 'proxy-fetch') {
+            console.log('Handling proxy-fetch:', event.data.url);
+            try {
+              const result = await proxyRequest(
+                event.data.url,
+                event.data.method,
+                event.data.headers,
+                event.data.body
+              );
+              
+              iframe.contentWindow.postMessage({
+                type: 'proxy-fetch-response',
+                id: event.data.id,
+                url: event.data.url,
+                status: result.status,
+                statusText: result.statusText,
+                headers: result.headers,
+                data: result.data,
+                contentType: result.contentType
+              }, '*');
+              
+            } catch (error) {
+              console.error('Proxy fetch error:', error);
+              iframe.contentWindow.postMessage({
+                type: 'proxy-fetch-response',
+                id: event.data.id,
+                url: event.data.url,
+                error: error.message
+              }, '*');
+            }
+          }
+        });
+
+        // Start loading the page
+        console.log('Starting page load for:', url);
+        loadPage();
+      }
+    </script>
+  </body>
+</html>

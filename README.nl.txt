@@ -1,0 +1,1 @@
+Deze app maakt het mogelijk om lokale webpagina's te gebruiken in je Dashboards als je weg van huis bent.

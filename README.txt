@@ -1,0 +1,1 @@
+This app allows you to show local-only webpages in widget when you're away from home. It proxies all web requests from the page through Homey, which means that it's also available when you're outside your home network (via the Athom cloud)
