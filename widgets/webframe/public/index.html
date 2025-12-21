@@ -391,39 +391,147 @@
                 try {
                   absoluteUrl = new URL(url, baseUrl).href;
                 } catch (e) {
+                  console.error('Failed to parse URL:', url, e);
                   absoluteUrl = url;
                 }
                 
-                console.log('Proxying fetch:', absoluteUrl);
+                console.log('Intercepted fetch call:', absoluteUrl);
                 
                 try {
+                  // Prepare headers as plain object
+                  let headersObj = {};
+                  if (init.headers) {
+                    if (init.headers instanceof Headers) {
+                      init.headers.forEach((value, key) => {
+                        headersObj[key] = value;
+                      });
+                    } else if (typeof init.headers === 'object') {
+                      headersObj = { ...init.headers };
+                    }
+                  }
+                  
+                  // Prepare body if present
+                  let bodyData = init.body;
+                  if (bodyData instanceof FormData) {
+                    // Convert FormData to object
+                    const formObj = {};
+                    for (const [key, value] of bodyData.entries()) {
+                      formObj[key] = value;
+                    }
+                    bodyData = JSON.stringify(formObj);
+                  } else if (bodyData instanceof Blob) {
+                    // Convert Blob to base64
+                    bodyData = await new Promise((resolve) => {
+                      const reader = new FileReader();
+                      reader.onloadend = () => resolve(reader.result);
+                      reader.readAsDataURL(bodyData);
+                    });
+                  }
+                  
                   const result = await window.parent.handleProxyFetch(
                     absoluteUrl,
                     init.method || 'GET',
-                    init.headers || {},
-                    init.body
+                    headersObj,
+                    bodyData
                   );
                   
                   if (!result.success) {
-                    throw new Error(result.error);
+                    throw new Error(result.error || 'Fetch failed');
                   }
                   
+                  // Decode base64 response
                   const binaryString = atob(result.data);
                   const bytes = new Uint8Array(binaryString.length);
                   for (let i = 0; i < binaryString.length; i++) {
                     bytes[i] = binaryString.charCodeAt(i);
                   }
-                  const blob = new Blob([bytes], { type: result.contentType });
+                  
+                  // Create response with proper content type
+                  const contentType = result.contentType || 'application/octet-stream';
+                  const blob = new Blob([bytes], { type: contentType });
+                  
+                  // Build headers object
+                  const responseHeaders = new Headers();
+                  if (result.headers) {
+                    for (const [key, value] of Object.entries(result.headers)) {
+                      responseHeaders.set(key, value);
+                    }
+                  }
                   
                   return new Response(blob, {
-                    status: result.status,
-                    statusText: result.statusText,
-                    headers: result.headers
+                    status: result.status || 200,
+                    statusText: result.statusText || 'OK',
+                    headers: responseHeaders
                   });
                 } catch (error) {
-                  console.error('Fetch error:', error);
+                  console.error('Fetch proxy error:', error);
                   throw error;
                 }
+              };
+              
+              // Override XMLHttpRequest to use parent's proxy
+              const OriginalXHR = window.XMLHttpRequest;
+              window.XMLHttpRequest = function() {
+                const xhr = new OriginalXHR();
+                const originalOpen = xhr.open;
+                const originalSend = xhr.send;
+                let requestMethod = 'GET';
+                let requestUrl = '';
+                let requestHeaders = {};
+                
+                xhr.open = function(method, url, ...args) {
+                  requestMethod = method;
+                  requestUrl = url;
+                  
+                  // Don't actually open the real XHR
+                  return;
+                };
+                
+                xhr.setRequestHeader = function(name, value) {
+                  requestHeaders[name] = value;
+                };
+                
+                xhr.send = async function(body) {
+                  try {
+                    let absoluteUrl;
+                    try {
+                      absoluteUrl = new URL(requestUrl, baseUrl).href;
+                    } catch (e) {
+                      absoluteUrl = requestUrl;
+                    }
+                    
+                    console.log('Intercepted XHR call:', absoluteUrl);
+                    
+                    const result = await window.parent.handleProxyFetch(
+                      absoluteUrl,
+                      requestMethod,
+                      requestHeaders,
+                      body
+                    );
+                    
+                    if (result.success) {
+                      // Simulate successful response
+                      Object.defineProperty(xhr, 'readyState', { value: 4, writable: false });
+                      Object.defineProperty(xhr, 'status', { value: result.status || 200, writable: false });
+                      Object.defineProperty(xhr, 'statusText', { value: result.statusText || 'OK', writable: false });
+                      Object.defineProperty(xhr, 'responseText', { value: atob(result.data), writable: false });
+                      Object.defineProperty(xhr, 'response', { value: atob(result.data), writable: false });
+                      
+                      if (xhr.onload) xhr.onload();
+                      if (xhr.onreadystatechange) xhr.onreadystatechange();
+                    } else {
+                      Object.defineProperty(xhr, 'readyState', { value: 4, writable: false });
+                      Object.defineProperty(xhr, 'status', { value: result.status || 500, writable: false });
+                      
+                      if (xhr.onerror) xhr.onerror();
+                    }
+                  } catch (error) {
+                    console.error('XHR proxy error:', error);
+                    if (xhr.onerror) xhr.onerror();
+                  }
+                };
+                
+                return xhr;
               };
               
               // Intercept link clicks
