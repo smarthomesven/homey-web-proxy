@@ -7,5 +7,8 @@
   },
   "1.0.2": {
     "en": "Added meta refresh tag support and fixed an issue where in some cases page resources weren't loaded via proxy"
+  },
+  "1.0.3": {
+    "en": "Added proxy feature for stylesheet url() resources"
   }
 }
