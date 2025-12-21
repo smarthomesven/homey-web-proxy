@@ -211,6 +211,51 @@
           }
         };
 
+        // Process CSS to replace url() references with data URIs
+        async function processCssUrls(cssContent, cssBaseUrl) {
+          // Find all url() references in the CSS
+          const urlRegex = /url\(\s*['"]?([^'")]+)['"]?\s*\)/gi;
+          const urls = [];
+          let match;
+          
+          // Collect all URLs
+          while ((match = urlRegex.exec(cssContent)) !== null) {
+            const url = match[1];
+            // Skip data URIs and absolute HTTP(S) URLs from other domains
+            if (!url.startsWith('data:') && !url.startsWith('http://') && !url.startsWith('https://')) {
+              urls.push({ original: match[0], url: url });
+            }
+          }
+          
+          console.log('Found', urls.length, 'URLs in CSS to proxy');
+          
+          // Load and replace each URL
+          for (const item of urls) {
+            try {
+              // Make URL absolute relative to the CSS file location
+              const absoluteUrl = new URL(item.url, cssBaseUrl).href;
+              console.log('Loading font/resource from CSS:', absoluteUrl);
+              
+              const result = await proxyRequest(absoluteUrl);
+              
+              // Get MIME type
+              let mimeType = result.contentType || 'application/octet-stream';
+              // Remove charset if present
+              mimeType = mimeType.split(';')[0].trim();
+              
+              // Replace the url() with a data URI
+              const dataUri = `url(data:${mimeType};base64,${result.data})`;
+              cssContent = cssContent.replace(item.original, dataUri);
+              
+              console.log('Replaced', item.url, 'with data URI');
+            } catch (error) {
+              console.error('Failed to load resource from CSS:', item.url, error);
+            }
+          }
+          
+          return cssContent;
+        }
+
         // Scan and load all resources
         async function scanAndLoadResources() {
           if (!iframe.contentDocument) {
@@ -249,13 +294,39 @@
             try {
               console.log('Loading stylesheet:', cssUrl);
               const result = await proxyRequest(cssUrl);
-              const cssContent = base64DecodeUnicode(result.data);
+              let cssContent = base64DecodeUnicode(result.data);
+              
+              // Process CSS to replace font URLs with data URIs
+              cssContent = await processCssUrls(cssContent, cssUrl);
               
               const style = iframe.contentDocument.createElement('style');
               style.textContent = cssContent;
               link.parentNode.insertBefore(style, link.nextSibling);
             } catch (error) {
               console.error('Failed to load stylesheet:', cssUrl, error);
+            }
+          }
+          
+          // Process inline stylesheets
+          const inlineStyles = iframe.contentDocument.querySelectorAll('style[data-proxy-process]');
+          console.log('Found', inlineStyles.length, 'inline stylesheets to process');
+          for (let i = 0; i < inlineStyles.length; i++) {
+            const style = inlineStyles[i];
+            const baseUrl = style.getAttribute('data-proxy-base-url');
+            if (!baseUrl) continue;
+            
+            try {
+              console.log('Processing inline stylesheet');
+              let cssContent = style.textContent;
+              
+              // Process CSS to replace URLs with data URIs
+              cssContent = await processCssUrls(cssContent, baseUrl);
+              
+              style.textContent = cssContent;
+              style.removeAttribute('data-proxy-process');
+              style.removeAttribute('data-proxy-base-url');
+            } catch (error) {
+              console.error('Failed to process inline stylesheet:', error);
             }
           }
           
@@ -417,6 +488,16 @@
                     } catch (e) {
                       console.error('Failed to process stylesheet:', href, e);
                     }
+                  }
+                });
+                
+                // Mark inline stylesheets for processing
+                document.querySelectorAll('style').forEach(style => {
+                  // Only mark if it contains url() references
+                  if (style.textContent && style.textContent.includes('url(')) {
+                    style.setAttribute('data-proxy-process', 'true');
+                    style.setAttribute('data-proxy-base-url', baseUrl);
+                    console.log('Marked inline stylesheet for processing');
                   }
                 });
                 
