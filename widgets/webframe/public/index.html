@@ -93,16 +93,6 @@
           }
         }
 
-        // Convert relative URLs to absolute
-        function makeAbsoluteUrl(baseUrl, relativeUrl) {
-          try {
-            return new URL(relativeUrl, baseUrl).href;
-          } catch (e) {
-            console.error('Failed to make absolute URL:', e);
-            return relativeUrl;
-          }
-        }
-
         // Better base64 decode that handles Unicode
         function base64DecodeUnicode(base64) {
           try {
@@ -118,12 +108,33 @@
           }
         }
 
-        // Load and process the main page
+        // Parse meta refresh tag from HTML
+        function parseMetaRefresh(html, baseUrl) {
+          const metaRefreshRegex = /<meta\s+http-equiv=["']refresh["']\s+content=["'](\d+);\s*url=([^"']+)["']\s*\/?>/i;
+          const match = html.match(metaRefreshRegex);
+          
+          if (match) {
+            const delay = parseInt(match[1], 10) || 0;
+            let targetUrl = match[2].trim();
+            
+            try {
+              targetUrl = new URL(targetUrl, baseUrl).href;
+            } catch (e) {
+              console.error('Failed to parse meta refresh URL:', e);
+              return null;
+            }
+            
+            console.log('Found meta refresh:', { delay, targetUrl });
+            return { delay, targetUrl };
+          }
+          
+          return null;
+        }
+
         async function loadPage() {
           await loadPageFromUrl(url);
         }
 
-        // Reusable function to load a page from any URL
         async function loadPageFromUrl(pageUrl) {
           try {
             updateStatus('Fetching page...');
@@ -132,7 +143,6 @@
             updateStatus('Processing HTML...');
             console.log('Content type:', result.contentType);
             
-            // Decode base64 response
             let htmlContent;
             try {
               htmlContent = base64DecodeUnicode(result.data);
@@ -142,30 +152,39 @@
               throw new Error('Failed to decode response: ' + decodeError.message);
             }
             
-            // Process HTML by injecting proxy script
+            // Check for meta refresh
+            const metaRefresh = parseMetaRefresh(htmlContent, pageUrl);
+            if (metaRefresh) {
+              console.log('Meta refresh detected, redirecting in', metaRefresh.delay, 'ms to', metaRefresh.targetUrl);
+              updateStatus(`Redirecting in ${metaRefresh.delay}ms...`);
+              
+              setTimeout(() => {
+                loadPageFromUrl(metaRefresh.targetUrl);
+              }, metaRefresh.delay * 1000);
+              
+              return;
+            }
+            
+            // Process HTML
+            console.log('Injecting proxy script');
             const processed = injectProxyIntoHtml(htmlContent, pageUrl);
             console.log('Processed HTML length:', processed.length);
             
             updateStatus('Loading into frame...');
             
-            // Create srcdoc content
             iframe.srcdoc = processed;
             
-            // Wait a bit for content to load
-            setTimeout(() => {
+            iframe.onload = function() {
+              console.log('Iframe loaded');
               loading.style.display = 'none';
               iframe.style.display = 'block';
               updateStatus('Ready');
               
-              // Scan iframe for external scripts and load them
-              scanAndLoadScripts();
-              
-              // Also scan and load stylesheets
-              scanAndLoadStylesheets();
-              
-              // And load images
-              scanAndLoadImages();
-            }, 500);
+              // Start loading resources after iframe is ready
+              setTimeout(() => {
+                scanAndLoadResources();
+              }, 100);
+            };
             
           } catch (error) {
             console.error('Failed to load page:', error);
@@ -177,15 +196,13 @@
           document.body.innerHTML = '<div class="error">' + msg + '</div>';
         }
 
-        // Expose navigation function for iframe to call directly
+        // Expose navigation function
         window.handleProxyNavigation = async function(targetUrl) {
           console.log('Handling navigation to:', targetUrl);
-          // Show loading state
           loading.style.display = 'flex';
           iframe.style.display = 'none';
           updateStatus('Loading...');
           
-          // Load the new page
           try {
             await loadPageFromUrl(targetUrl);
           } catch (error) {
@@ -194,144 +211,110 @@
           }
         };
 
-        // Scan iframe for external scripts and load them through proxy
-        async function scanAndLoadScripts() {
-          try {
-            if (!iframe.contentDocument) {
-              console.error('Cannot access iframe content');
-              return;
-            }
-            
-            // Find all script elements with data-original-src attribute
-            const scripts = iframe.contentDocument.querySelectorAll('script[data-original-src]');
-            console.log('Found', scripts.length, 'scripts to load from parent');
-            
-            for (let i = 0; i < scripts.length; i++) {
-              const script = scripts[i];
-              const scriptUrl = script.getAttribute('data-original-src');
-              
-              if (!scriptUrl) continue;
-              
-              console.log('Loading script from parent:', scriptUrl);
-              
-              try {
-                const result = await proxyRequest(scriptUrl);
-                const jsContent = base64DecodeUnicode(result.data);
-                
-                // Create new script element
-                const newScript = iframe.contentDocument.createElement('script');
-                newScript.textContent = jsContent;
-                
-                // Replace the original script element
-                if (script.parentNode) {
-                  script.parentNode.replaceChild(newScript, script);
-                  console.log('Inserted script:', scriptUrl);
-                }
-              } catch (error) {
-                console.error('Failed to load script:', scriptUrl, error);
-              }
-            }
-            
-            console.log('Finished loading external scripts');
-          } catch (error) {
-            console.error('Error in scanAndLoadScripts:', error);
+        // Scan and load all resources
+        async function scanAndLoadResources() {
+          if (!iframe.contentDocument) {
+            console.error('Cannot access iframe content');
+            return;
           }
+
+          console.log('Scanning for resources to load...');
+          
+          // Load images
+          const images = iframe.contentDocument.querySelectorAll('img[data-proxy-src]');
+          console.log('Found', images.length, 'images to load');
+          for (let i = 0; i < images.length; i++) {
+            const img = images[i];
+            const imgUrl = img.getAttribute('data-proxy-src');
+            if (!imgUrl) continue;
+            
+            try {
+              console.log('Loading image:', imgUrl);
+              const result = await proxyRequest(imgUrl);
+              const contentType = result.contentType || 'image/png';
+              img.src = `data:${contentType};base64,${result.data}`;
+            } catch (error) {
+              console.error('Failed to load image:', imgUrl, error);
+            }
+          }
+          
+          // Load stylesheets
+          const links = iframe.contentDocument.querySelectorAll('link[data-proxy-href]');
+          console.log('Found', links.length, 'stylesheets to load');
+          for (let i = 0; i < links.length; i++) {
+            const link = links[i];
+            const cssUrl = link.getAttribute('data-proxy-href');
+            if (!cssUrl) continue;
+            
+            try {
+              console.log('Loading stylesheet:', cssUrl);
+              const result = await proxyRequest(cssUrl);
+              const cssContent = base64DecodeUnicode(result.data);
+              
+              const style = iframe.contentDocument.createElement('style');
+              style.textContent = cssContent;
+              link.parentNode.insertBefore(style, link.nextSibling);
+            } catch (error) {
+              console.error('Failed to load stylesheet:', cssUrl, error);
+            }
+          }
+          
+          // Load scripts
+          const scripts = iframe.contentDocument.querySelectorAll('script[data-proxy-src]');
+          console.log('Found', scripts.length, 'scripts to load');
+          for (let i = 0; i < scripts.length; i++) {
+            const script = scripts[i];
+            const scriptUrl = script.getAttribute('data-proxy-src');
+            if (!scriptUrl) continue;
+            
+            try {
+              console.log('Loading script:', scriptUrl);
+              const result = await proxyRequest(scriptUrl);
+              const jsContent = base64DecodeUnicode(result.data);
+              
+              const newScript = iframe.contentDocument.createElement('script');
+              newScript.textContent = jsContent;
+              script.parentNode.replaceChild(newScript, script);
+            } catch (error) {
+              console.error('Failed to load script:', scriptUrl, error);
+            }
+          }
+          
+          console.log('Finished loading resources');
         }
 
-        // Scan iframe for stylesheets and load them through proxy
-        async function scanAndLoadStylesheets() {
+        // Expose fetch proxy for iframe
+        window.handleProxyFetch = async function(url, method, headers, body) {
+          console.log('Handling proxy fetch:', url);
           try {
-            if (!iframe.contentDocument) {
-              console.error('Cannot access iframe content');
-              return;
-            }
-            
-            // Find all link elements with data-original-href attribute
-            const links = iframe.contentDocument.querySelectorAll('link[data-original-href]');
-            console.log('Found', links.length, 'stylesheets to load from parent');
-            
-            for (let i = 0; i < links.length; i++) {
-              const link = links[i];
-              const cssUrl = link.getAttribute('data-original-href');
-              
-              if (!cssUrl) continue;
-              
-              console.log('Loading stylesheet from parent:', cssUrl);
-              
-              try {
-                const result = await proxyRequest(cssUrl);
-                const cssContent = base64DecodeUnicode(result.data);
-                
-                // Create style element
-                const style = iframe.contentDocument.createElement('style');
-                style.textContent = cssContent;
-                
-                // Insert after the link element
-                if (link.parentNode) {
-                  link.parentNode.insertBefore(style, link.nextSibling);
-                  console.log('Inserted stylesheet:', cssUrl);
-                }
-              } catch (error) {
-                console.error('Failed to load stylesheet:', cssUrl, error);
-              }
-            }
-            
-            console.log('Finished loading stylesheets');
+            const result = await proxyRequest(url, method, headers, body);
+            return {
+              success: true,
+              status: result.status,
+              statusText: result.statusText,
+              headers: result.headers,
+              data: result.data,
+              contentType: result.contentType
+            };
           } catch (error) {
-            console.error('Error in scanAndLoadStylesheets:', error);
+            console.error('Proxy fetch error:', error);
+            return {
+              success: false,
+              error: error.message
+            };
           }
-        }
+        };
 
-        // Scan iframe for images and load them through proxy
-        async function scanAndLoadImages() {
-          try {
-            if (!iframe.contentDocument) {
-              console.error('Cannot access iframe content');
-              return;
-            }
-            
-            // Find all img elements with data-original-src attribute
-            const images = iframe.contentDocument.querySelectorAll('img[data-original-src]');
-            console.log('Found', images.length, 'images to load from parent');
-            
-            for (let i = 0; i < images.length; i++) {
-              const img = images[i];
-              const imgUrl = img.getAttribute('data-original-src');
-              
-              if (!imgUrl) continue;
-              
-              console.log('Loading image from parent:', imgUrl);
-              
-              try {
-                const result = await proxyRequest(imgUrl);
-                const contentType = result.contentType || 'image/png';
-                
-                // Set image src to data URL
-                img.src = `data:${contentType};base64,${result.data}`;
-                console.log('Loaded image:', imgUrl);
-              } catch (error) {
-                console.error('Failed to load image:', imgUrl, error);
-              }
-            }
-            
-            console.log('Finished loading images');
-          } catch (error) {
-            console.error('Error in scanAndLoadImages:', error);
-          }
-        }
-
-        // Inject proxy script into HTML using string manipulation
         function injectProxyIntoHtml(html, baseUrl) {
-          // Create the proxy script
           const proxyScript = `
             <script>
             (function() {
               console.log('Proxy script initializing...');
               const baseUrl = '${baseUrl.replace(/'/g, "\\'")}';
               
-              // Override fetch to proxy through parent
+              // Override fetch to use parent's proxy
               const originalFetch = window.fetch;
-              window.fetch = function(resource, init = {}) {
+              window.fetch = async function(resource, init = {}) {
                 const url = typeof resource === 'string' ? resource : resource.url;
                 let absoluteUrl;
                 try {
@@ -342,56 +325,38 @@
                 
                 console.log('Proxying fetch:', absoluteUrl);
                 
-                return new Promise((resolve, reject) => {
-                  const messageId = Math.random().toString(36);
+                try {
+                  const result = await window.parent.handleProxyFetch(
+                    absoluteUrl,
+                    init.method || 'GET',
+                    init.headers || {},
+                    init.body
+                  );
                   
-                  window.parent.postMessage({
-                    type: 'proxy-fetch',
-                    id: messageId,
-                    url: absoluteUrl,
-                    method: init.method || 'GET',
-                    headers: init.headers || {},
-                    body: init.body
-                  }, '*');
+                  if (!result.success) {
+                    throw new Error(result.error);
+                  }
                   
-                  const handler = function(event) {
-                    if (event.data.type === 'proxy-fetch-response' && event.data.id === messageId) {
-                      window.removeEventListener('message', handler);
-                      
-                      if (event.data.error) {
-                        reject(new Error(event.data.error));
-                      } else {
-                        try {
-                          const binaryString = atob(event.data.data);
-                          const bytes = new Uint8Array(binaryString.length);
-                          for (let i = 0; i < binaryString.length; i++) {
-                            bytes[i] = binaryString.charCodeAt(i);
-                          }
-                          const blob = new Blob([bytes], { type: event.data.contentType });
-                          
-                          resolve(new Response(blob, {
-                            status: event.data.status,
-                            statusText: event.data.statusText,
-                            headers: event.data.headers
-                          }));
-                        } catch (e) {
-                          reject(e);
-                        }
-                      }
-                    }
-                  };
+                  const binaryString = atob(result.data);
+                  const bytes = new Uint8Array(binaryString.length);
+                  for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                  }
+                  const blob = new Blob([bytes], { type: result.contentType });
                   
-                  window.addEventListener('message', handler);
-                  setTimeout(() => {
-                    window.removeEventListener('message', handler);
-                    reject(new Error('Request timeout'));
-                  }, 30000);
-                });
+                  return new Response(blob, {
+                    status: result.status,
+                    statusText: result.statusText,
+                    headers: result.headers
+                  });
+                } catch (error) {
+                  console.error('Fetch error:', error);
+                  throw error;
+                }
               };
               
               // Intercept link clicks
               document.addEventListener('click', function(e) {
-                // Find the closest anchor tag
                 let target = e.target;
                 while (target && target.tagName !== 'A') {
                   target = target.parentElement;
@@ -402,149 +367,95 @@
                 const href = target.getAttribute('href');
                 if (!href || href.startsWith('#') || href.startsWith('javascript:') || 
                     href.startsWith('mailto:') || href.startsWith('tel:')) {
-                  return; // Let these navigate normally
+                  return;
                 }
                 
-                // Check if it's a same-origin link
                 try {
                   const linkUrl = new URL(href, baseUrl);
                   const baseUrlObj = new URL(baseUrl);
                   
-                  // Only intercept same-origin links
                   if (linkUrl.origin === baseUrlObj.origin) {
                     e.preventDefault();
                     e.stopPropagation();
-                    const urlString = linkUrl.href;
-                    console.log('Intercepted link click:', urlString);
+                    console.log('Intercepted link click:', linkUrl.href);
                     
-                    // Call parent function directly instead of postMessage
                     if (window.parent && window.parent.handleProxyNavigation) {
-                      window.parent.handleProxyNavigation(urlString);
+                      window.parent.handleProxyNavigation(linkUrl.href);
                     }
                   }
                 } catch (err) {
                   console.error('Failed to process link:', href, err);
                 }
-              }, true); // Use capture phase to catch it early
+              }, true);
               
-              // Function to initialize resource loading
-              function initResourceLoading() {
-                console.log('Initializing resource loading');
+              // Mark resources for parent to load
+              function markResources() {
+                console.log('Marking resources for loading');
                 
-                // Rewrite image sources - just mark them for loading
+                // Mark images
                 document.querySelectorAll('img[src]').forEach(img => {
                   const src = img.getAttribute('src');
                   if (src && !src.startsWith('data:') && !src.startsWith('blob:')) {
                     try {
                       const absoluteUrl = new URL(src, baseUrl).href;
-                      img.setAttribute('data-original-src', absoluteUrl);
-                      img.setAttribute('src', 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg"%3E%3C/svg%3E');
-                      console.log('Marked image for loading:', absoluteUrl);
+                      img.setAttribute('data-proxy-src', absoluteUrl);
+                      img.removeAttribute('src');
                     } catch (e) {
                       console.error('Failed to process image:', src, e);
                     }
                   }
                 });
                 
-                // Rewrite stylesheet links - just mark them, don't try to load via postMessage
+                // Mark stylesheets
                 document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
                   const href = link.getAttribute('href');
                   if (href && !href.startsWith('data:') && !href.startsWith('blob:')) {
                     try {
                       const absoluteUrl = new URL(href, baseUrl).href;
-                      link.setAttribute('data-original-href', absoluteUrl);
+                      link.setAttribute('data-proxy-href', absoluteUrl);
                       link.removeAttribute('href');
-                      console.log('Marked stylesheet for loading:', absoluteUrl);
                     } catch (e) {
                       console.error('Failed to process stylesheet:', href, e);
                     }
                   }
                 });
                 
-                // Rewrite script sources - just mark them, don't try to load via postMessage
-                const scripts = Array.from(document.querySelectorAll('script[src]'));
-                console.log('Found', scripts.length, 'external scripts');
-                
-                scripts.forEach((script, index) => {
+                // Mark scripts
+                document.querySelectorAll('script[src]').forEach(script => {
                   const src = script.getAttribute('src');
-                  if (!src || src.startsWith('data:') || src.startsWith('blob:')) {
-                    return;
-                  }
-                  
-                  try {
-                    const absoluteUrl = new URL(src, baseUrl).href;
-                    
-                    // Mark the script with its URL - parent will load it
-                    script.setAttribute('data-original-src', absoluteUrl);
-                    script.removeAttribute('src');
-                    
-                    console.log('Marked script for loading:', absoluteUrl);
-                  } catch (e) {
-                    console.error('Failed to process script:', src, e);
+                  if (src && !src.startsWith('data:') && !src.startsWith('blob:')) {
+                    try {
+                      const absoluteUrl = new URL(src, baseUrl).href;
+                      script.setAttribute('data-proxy-src', absoluteUrl);
+                      script.removeAttribute('src');
+                    } catch (e) {
+                      console.error('Failed to process script:', src, e);
+                    }
                   }
                 });
                 
-                console.log('Resource loading initialized');
+                console.log('Resources marked');
               }
               
-              // Wait for DOM to be ready
               if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', initResourceLoading);
+                document.addEventListener('DOMContentLoaded', markResources);
               } else {
-                initResourceLoading();
+                markResources();
               }
               
               console.log('Proxy script initialized');
             })();
             </` + `script>`;
           
-          // Try to inject after <head> tag, or before </head>, or at the start of <body>
           if (html.includes('</head>')) {
             return html.replace('</head>', proxyScript + '</head>');
           } else if (html.includes('<body')) {
             return html.replace(/<body([^>]*)>/, '<body$1>' + proxyScript);
           } else {
-            // Just prepend to the HTML
             return proxyScript + html;
           }
         }
 
-        // Handle messages from iframe (only for fetch requests)
-        window.addEventListener('message', async function(event) {
-          if (event.data.type === 'proxy-fetch') {
-            console.log('Handling proxy-fetch:', event.data.url);
-            try {
-              const result = await proxyRequest(
-                event.data.url,
-                event.data.method,
-                event.data.headers,
-                event.data.body
-              );
-              
-              iframe.contentWindow.postMessage({
-                type: 'proxy-fetch-response',
-                id: event.data.id,
-                url: event.data.url,
-                status: result.status,
-                statusText: result.statusText,
-                headers: result.headers,
-                data: result.data,
-                contentType: result.contentType
-              }, '*');
-              
-            } catch (error) {
-              console.error('Proxy fetch error:', error);
-              iframe.contentWindow.postMessage({
-                type: 'proxy-fetch-response',
-                id: event.data.id,
-                url: event.data.url,
-                error: error.message
-              }, '*');
-            }
-          }
-        });
-
-        // Start loading the page
         console.log('Starting page load for:', url);
         loadPage();
       }
