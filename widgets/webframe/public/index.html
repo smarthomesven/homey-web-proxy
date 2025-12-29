@@ -349,8 +349,16 @@
             if (!imgUrl) continue;
             
             try {
-              console.log('Loading image:', imgUrl);
-              const result = await proxyRequest(imgUrl);
+              // Convert to absolute URL
+              const absoluteUrl = new URL(imgUrl, url).href;
+              console.log('Loading image:', absoluteUrl);
+              const result = await proxyRequest(absoluteUrl);
+              
+              if (result.status !== 200) {
+                console.error('Failed to load image:', absoluteUrl, 'Status:', result.status);
+                continue;
+              }
+              
               const contentType = result.contentType || 'image/png';
               img.src = `data:${contentType};base64,${result.data}`;
             } catch (error) {
@@ -367,12 +375,20 @@
             if (!cssUrl) continue;
             
             try {
-              console.log('Loading stylesheet:', cssUrl);
-              const result = await proxyRequest(cssUrl);
+              // Convert to absolute URL
+              const absoluteUrl = new URL(cssUrl, url).href;
+              console.log('Loading stylesheet:', absoluteUrl);
+              const result = await proxyRequest(absoluteUrl);
+              
+              if (result.status !== 200) {
+                console.error('Failed to load stylesheet:', absoluteUrl, 'Status:', result.status);
+                continue;
+              }
+              
               let cssContent = base64DecodeUnicode(result.data);
               
               // Process CSS to replace font URLs with data URIs
-              cssContent = await processCssUrls(cssContent, cssUrl);
+              cssContent = await processCssUrls(cssContent, absoluteUrl);
               
               const style = iframe.contentDocument.createElement('style');
               style.textContent = cssContent;
@@ -414,8 +430,24 @@
             if (!scriptUrl) continue;
             
             try {
-              console.log('Loading script:', scriptUrl);
-              const result = await proxyRequest(scriptUrl);
+              // Convert to absolute URL
+              const absoluteUrl = new URL(scriptUrl, url).href;
+              console.log('Loading script:', absoluteUrl);
+              const result = await proxyRequest(absoluteUrl);
+              
+              // Check if we got a valid response
+              if (result.status !== 200) {
+                console.error('Failed to load script:', absoluteUrl, 'Status:', result.status);
+                continue;
+              }
+              
+              // Check if content type is JavaScript
+              const contentType = result.contentType || '';
+              if (!contentType.includes('javascript') && !contentType.includes('ecmascript')) {
+                console.warn('Script has unexpected content type:', contentType, 'for', absoluteUrl);
+                // Continue anyway as some servers don't set the right content type
+              }
+              
               const jsContent = base64DecodeUnicode(result.data);
               
               const newScript = iframe.contentDocument.createElement('script');
@@ -566,14 +598,231 @@
         }
 
         function injectProxyIntoHtml(html, baseUrl) {
+          // Remove or modify resource URLs in the HTML before browser parses it
+          // This prevents 404 errors during initial load
+          
+          // Replace script src with data-proxy-src
+          html = html.replace(/<script([^>]*)\ssrc=["']([^"']+)["']/gi, (match, attrs, src) => {
+            return `<script${attrs} data-proxy-src="${src}"`;
+          });
+          
+          // Replace link href for stylesheets with data-proxy-href
+          html = html.replace(/<link([^>]*rel=["']stylesheet["'][^>]*)\shref=["']([^"']+)["']/gi, (match, attrs, href) => {
+            return `<link${attrs} data-proxy-href="${href}"`;
+          });
+          html = html.replace(/<link([^>]*)\shref=["']([^"']+)["']([^>]*rel=["']stylesheet["'][^>]*)/gi, (match, attrs1, href, attrs2) => {
+            return `<link${attrs1} data-proxy-href="${href}"${attrs2}`;
+          });
+          
+          // Replace img src with data-proxy-src
+          html = html.replace(/<img([^>]*)\ssrc=["']([^"']+)["']/gi, (match, attrs, src) => {
+            // Skip data URIs
+            if (src.startsWith('data:') || src.startsWith('blob:')) {
+              return match;
+            }
+            return `<img${attrs} data-proxy-src="${src}"`;
+          });
+          
           const proxyScript = `
             <script>
             (function() {
               console.log('Proxy script initializing...');
               const baseUrl = '${baseUrl.replace(/'/g, "\\'")}';
               
+              // Parse base URL
+              const baseUrlObj = new URL(baseUrl);
+              
+              // Override location to make scripts think they're on the original server
+              const originalLocation = window.location;
+              const fakeLocation = {
+                href: baseUrl,
+                protocol: baseUrlObj.protocol,
+                host: baseUrlObj.host,
+                hostname: baseUrlObj.hostname,
+                port: baseUrlObj.port,
+                pathname: baseUrlObj.pathname,
+                search: baseUrlObj.search,
+                hash: baseUrlObj.hash,
+                origin: baseUrlObj.origin,
+                toString: function() { return baseUrl; },
+                assign: function(url) { 
+                  if (window.parent && window.parent.handleProxyNavigation) {
+                    window.parent.handleProxyNavigation(new URL(url, baseUrl).href);
+                  }
+                },
+                replace: function(url) { 
+                  if (window.parent && window.parent.handleProxyNavigation) {
+                    window.parent.handleProxyNavigation(new URL(url, baseUrl).href);
+                  }
+                },
+                reload: function() {
+                  if (window.parent && window.parent.handleProxyNavigation) {
+                    window.parent.handleProxyNavigation(baseUrl);
+                  }
+                }
+              };
+              
+              // Override window.location
+              try {
+                Object.defineProperty(window, 'location', {
+                  get: function() { return fakeLocation; },
+                  set: function(value) { 
+                    if (window.parent && window.parent.handleProxyNavigation) {
+                      window.parent.handleProxyNavigation(new URL(value, baseUrl).href);
+                    }
+                  }
+                });
+              } catch (e) {
+                console.warn('Could not override window.location:', e);
+              }
+              
+              // Override document.location
+              try {
+                Object.defineProperty(document, 'location', {
+                  get: function() { return fakeLocation; },
+                  set: function(value) { 
+                    if (window.parent && window.parent.handleProxyNavigation) {
+                      window.parent.handleProxyNavigation(new URL(value, baseUrl).href);
+                    }
+                  }
+                });
+              } catch (e) {
+                console.warn('Could not override document.location:', e);
+              }
+              
               // Store WebSocket connections
               const wsConnections = new Map();
+              
+              // Override Image constructor to intercept new Image() calls
+              const OriginalImage = window.Image;
+              window.Image = function(width, height) {
+                const img = new OriginalImage(width, height);
+                
+                // Override src property
+                const originalSrcDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+                Object.defineProperty(img, 'src', {
+                  get: function() {
+                    return this.getAttribute('src') || '';
+                  },
+                  set: function(value) {
+                    if (!value || value.startsWith('data:') || value.startsWith('blob:')) {
+                      originalSrcDescriptor.set.call(this, value);
+                      return;
+                    }
+                    
+                    let absoluteUrl;
+                    try {
+                      absoluteUrl = new URL(value, baseUrl).href;
+                    } catch (e) {
+                      absoluteUrl = value;
+                    }
+                    
+                    const urlObj = new URL(absoluteUrl);
+                    if (urlObj.origin !== baseUrlObj.origin) {
+                      const wrongPath = urlObj.pathname;
+                      let fixedPath = wrongPath;
+                      
+                      const prefixes = [
+                        '/app/nl.dypodex.proxy/widgets/webframe/',
+                        '/widgets/webframe/',
+                        '/webframe/'
+                      ];
+                      
+                      for (const prefix of prefixes) {
+                        if (fixedPath.startsWith(prefix)) {
+                          fixedPath = fixedPath.substring(prefix.length);
+                          break;
+                        }
+                      }
+                      
+                      absoluteUrl = new URL(fixedPath, baseUrl).href;
+                    }
+                    
+                    console.log('Image constructor src set:', absoluteUrl);
+                    
+                    (async () => {
+                      try {
+                        const result = await window.parent.handleProxyFetch(absoluteUrl, 'GET', {}, null);
+                        if (result.success && result.status === 200) {
+                          const contentType = result.contentType || 'image/png';
+                          originalSrcDescriptor.set.call(this, \`data:\${contentType};base64,\${result.data}\`);
+                        }
+                      } catch (error) {
+                        console.error('Error loading image:', error);
+                      }
+                    }).call(this);
+                  }
+                });
+                
+                return img;
+              };
+              
+              // Copy static properties
+              window.Image.prototype = OriginalImage.prototype;
+              
+              // Override HTMLImageElement.prototype.src for all img elements
+              const originalSrcDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+              if (originalSrcDescriptor && originalSrcDescriptor.configurable) {
+                Object.defineProperty(HTMLImageElement.prototype, 'src', {
+                  get: originalSrcDescriptor.get,
+                  set: function(value) {
+                    if (!value || value.startsWith('data:') || value.startsWith('blob:') || this.hasAttribute('data-proxy-processing')) {
+                      originalSrcDescriptor.set.call(this, value);
+                      return;
+                    }
+                    
+                    this.setAttribute('data-proxy-processing', 'true');
+                    
+                    let absoluteUrl;
+                    try {
+                      absoluteUrl = new URL(value, baseUrl).href;
+                    } catch (e) {
+                      absoluteUrl = value;
+                    }
+                    
+                    const urlObj = new URL(absoluteUrl);
+                    if (urlObj.origin !== baseUrlObj.origin) {
+                      const wrongPath = urlObj.pathname;
+                      let fixedPath = wrongPath;
+                      
+                      const prefixes = [
+                        '/app/nl.dypodex.proxy/widgets/webframe/',
+                        '/widgets/webframe/',
+                        '/webframe/'
+                      ];
+                      
+                      for (const prefix of prefixes) {
+                        if (fixedPath.startsWith(prefix)) {
+                          fixedPath = fixedPath.substring(prefix.length);
+                          break;
+                        }
+                      }
+                      
+                      absoluteUrl = new URL(fixedPath, baseUrl).href;
+                    }
+                    
+                    console.log('HTMLImageElement.prototype.src set:', absoluteUrl);
+                    
+                    (async () => {
+                      try {
+                        const result = await window.parent.handleProxyFetch(absoluteUrl, 'GET', {}, null);
+                        if (result.success && result.status === 200) {
+                          const contentType = result.contentType || 'image/png';
+                          this.removeAttribute('data-proxy-processing');
+                          originalSrcDescriptor.set.call(this, \`data:\${contentType};base64,\${result.data}\`);
+                        } else {
+                          this.removeAttribute('data-proxy-processing');
+                          console.error('Failed to load image:', absoluteUrl, result.status);
+                        }
+                      } catch (error) {
+                        this.removeAttribute('data-proxy-processing');
+                        console.error('Error loading image:', error);
+                      }
+                    }).call(this);
+                  },
+                  configurable: true
+                });
+              }
               
               // Override WebSocket constructor
               const OriginalWebSocket = window.WebSocket;
@@ -847,6 +1096,169 @@
                 return xhr;
               };
               
+              // Intercept dynamic script creation
+              const originalCreateElement = document.createElement;
+              document.createElement = function(tagName) {
+                const element = originalCreateElement.call(document, tagName);
+                
+                if (tagName.toLowerCase() === 'script') {
+                  const originalSetAttribute = element.setAttribute;
+                  element.setAttribute = function(name, value) {
+                    if (name.toLowerCase() === 'src') {
+                      // Intercept src attribute
+                      const originalSrc = value;
+                      let absoluteUrl;
+                      try {
+                        absoluteUrl = new URL(value, baseUrl).href;
+                      } catch (e) {
+                        absoluteUrl = value;
+                      }
+                      
+                      console.log('Intercepted dynamic script src:', absoluteUrl);
+                      
+                      // Check if this is trying to load from the wrong domain (Homey instead of original server)
+                      const urlObj = new URL(absoluteUrl);
+                      if (urlObj.origin !== baseUrlObj.origin) {
+                        // Try to fix the path - extract the relative path and make it relative to baseUrl
+                        const wrongPath = urlObj.pathname;
+                        console.warn('Script URL has wrong origin:', absoluteUrl);
+                        console.warn('Expected origin:', baseUrlObj.origin);
+                        
+                        // Try to extract the actual path after common prefixes
+                        let fixedPath = wrongPath;
+                        
+                        // Remove common proxy path prefixes
+                        const prefixes = [
+                          '/app/nl.dypodex.proxy/widgets/webframe/',
+                          '/widgets/webframe/',
+                          '/webframe/'
+                        ];
+                        
+                        for (const prefix of prefixes) {
+                          if (fixedPath.startsWith(prefix)) {
+                            fixedPath = fixedPath.substring(prefix.length);
+                            break;
+                          }
+                        }
+                        
+                        // Construct new URL with correct origin
+                        absoluteUrl = new URL(fixedPath, baseUrl).href;
+                        console.log('Fixed URL to:', absoluteUrl);
+                      }
+                      
+                      // Load via proxy
+                      (async () => {
+                        try {
+                          const result = await window.parent.handleProxyFetch(absoluteUrl, 'GET', {}, null);
+                          if (result.success && result.status === 200) {
+                            const jsContent = atob(result.data);
+                            element.textContent = jsContent;
+                            // Trigger load event
+                            if (element.onload) {
+                              setTimeout(() => element.onload(), 0);
+                            }
+                          } else {
+                            console.error('Failed to load dynamic script:', absoluteUrl, 'Status:', result.status);
+                            if (element.onerror) {
+                              setTimeout(() => element.onerror(new Error('Failed to load: ' + result.status)), 0);
+                            }
+                          }
+                        } catch (error) {
+                          console.error('Error loading dynamic script:', error);
+                          if (element.onerror) {
+                            setTimeout(() => element.onerror(error), 0);
+                          }
+                        }
+                      })();
+                      
+                      // Don't set the actual src attribute
+                      return;
+                    }
+                    return originalSetAttribute.call(element, name, value);
+                  };
+                  
+                  // Also intercept direct src property assignment
+                  Object.defineProperty(element, 'src', {
+                    get: function() {
+                      return this._proxySrc || '';
+                    },
+                    set: function(value) {
+                      this._proxySrc = value;
+                      this.setAttribute('src', value);
+                    }
+                  });
+                }
+                
+                if (tagName.toLowerCase() === 'img') {
+                  // Intercept img src changes
+                  const originalSetAttribute = element.setAttribute;
+                  element.setAttribute = function(name, value) {
+                    if (name.toLowerCase() === 'src' && value && !value.startsWith('data:') && !value.startsWith('blob:')) {
+                      let absoluteUrl;
+                      try {
+                        absoluteUrl = new URL(value, baseUrl).href;
+                      } catch (e) {
+                        absoluteUrl = value;
+                      }
+                      
+                      // Check if wrong domain
+                      const urlObj = new URL(absoluteUrl);
+                      if (urlObj.origin !== baseUrlObj.origin) {
+                        const wrongPath = urlObj.pathname;
+                        let fixedPath = wrongPath;
+                        
+                        const prefixes = [
+                          '/app/nl.dypodex.proxy/widgets/webframe/',
+                          '/widgets/webframe/',
+                          '/webframe/'
+                        ];
+                        
+                        for (const prefix of prefixes) {
+                          if (fixedPath.startsWith(prefix)) {
+                            fixedPath = fixedPath.substring(prefix.length);
+                            break;
+                          }
+                        }
+                        
+                        absoluteUrl = new URL(fixedPath, baseUrl).href;
+                      }
+                      
+                      console.log('Intercepted dynamic img src:', absoluteUrl);
+                      
+                      // Load via proxy
+                      (async () => {
+                        try {
+                          const result = await window.parent.handleProxyFetch(absoluteUrl, 'GET', {}, null);
+                          if (result.success && result.status === 200) {
+                            const contentType = result.contentType || 'image/png';
+                            originalSetAttribute.call(element, 'src', \`data:\${contentType};base64,\${result.data}\`);
+                          } else {
+                            console.error('Failed to load dynamic image:', absoluteUrl, 'Status:', result.status);
+                          }
+                        } catch (error) {
+                          console.error('Error loading dynamic image:', error);
+                        }
+                      })();
+                      
+                      return;
+                    }
+                    return originalSetAttribute.call(element, name, value);
+                  };
+                  
+                  // Intercept direct src property
+                  Object.defineProperty(element, 'src', {
+                    get: function() {
+                      return this.getAttribute('src') || '';
+                    },
+                    set: function(value) {
+                      this.setAttribute('src', value);
+                    }
+                  });
+                }
+                
+                return element;
+              };
+              
               // Intercept link clicks
               document.addEventListener('click', function(e) {
                 let target = e.target;
@@ -945,11 +1357,102 @@
                 markResources();
               }
               
+              // Watch for dynamically added images and fix their src
+              const observer = new MutationObserver((mutations) => {
+                mutations.forEach((mutation) => {
+                  mutation.addedNodes.forEach((node) => {
+                    if (node.nodeType === 1) { // Element node
+                      // Check if it's an image
+                      if (node.tagName === 'IMG') {
+                        fixImageSrc(node);
+                      }
+                      // Check for images in child nodes
+                      const images = node.querySelectorAll ? node.querySelectorAll('img') : [];
+                      images.forEach(img => fixImageSrc(img));
+                    }
+                  });
+                  
+                  // Also check for attribute changes on existing images
+                  if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
+                    if (mutation.target.tagName === 'IMG') {
+                      fixImageSrc(mutation.target);
+                    }
+                  }
+                });
+              });
+              
+              // Start observing
+              observer.observe(document.documentElement, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['src']
+              });
+              
+              function fixImageSrc(img) {
+                const src = img.getAttribute('src');
+                if (!src || src.startsWith('data:') || src.startsWith('blob:') || img.hasAttribute('data-proxy-fixed')) {
+                  return;
+                }
+                
+                // Mark as being processed
+                img.setAttribute('data-proxy-fixed', 'true');
+                
+                let absoluteUrl;
+                try {
+                  absoluteUrl = new URL(src, baseUrl).href;
+                } catch (e) {
+                  absoluteUrl = src;
+                }
+                
+                // Check if wrong domain
+                const urlObj = new URL(absoluteUrl);
+                if (urlObj.origin !== baseUrlObj.origin) {
+                  const wrongPath = urlObj.pathname;
+                  let fixedPath = wrongPath;
+                  
+                  const prefixes = [
+                    '/app/nl.dypodex.proxy/widgets/webframe/',
+                    '/widgets/webframe/',
+                    '/webframe/'
+                  ];
+                  
+                  for (const prefix of prefixes) {
+                    if (fixedPath.startsWith(prefix)) {
+                      fixedPath = fixedPath.substring(prefix.length);
+                      break;
+                    }
+                  }
+                  
+                  absoluteUrl = new URL(fixedPath, baseUrl).href;
+                }
+                
+                console.log('Fixing image src via MutationObserver:', absoluteUrl);
+                
+                // Load via proxy
+                (async () => {
+                  try {
+                    const result = await window.parent.handleProxyFetch(absoluteUrl, 'GET', {}, null);
+                    if (result.success && result.status === 200) {
+                      const contentType = result.contentType || 'image/png';
+                      img.src = \`data:\${contentType};base64,\${result.data}\`;
+                    } else {
+                      console.error('Failed to load image via observer:', absoluteUrl, 'Status:', result.status);
+                    }
+                  } catch (error) {
+                    console.error('Error loading image via observer:', error);
+                  }
+                })();
+              }
+              
               console.log('Proxy script initialized');
             })();
             </` + `script>`;
           
-          if (html.includes('</head>')) {
+          // Inject script at the beginning of head or body
+          if (html.includes('<head>')) {
+            return html.replace('<head>', '<head>' + proxyScript);
+          } else if (html.includes('</head>')) {
             return html.replace('</head>', proxyScript + '</head>');
           } else if (html.includes('<body')) {
             return html.replace(/<body([^>]*)>/, '<body$1>' + proxyScript);
