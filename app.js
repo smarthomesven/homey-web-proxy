@@ -2,6 +2,7 @@
 
 const Homey = require('homey');
 const axios = require('axios');
+const WebSocket = require('ws');
 
 module.exports = class WebProxyApp extends Homey.App {
 
@@ -10,6 +11,7 @@ module.exports = class WebProxyApp extends Homey.App {
    */
   async onInit() {
     this.log('Web Proxy App has been initialized');
+    this.websockets = new Map();
   }
 
   async webRequest(body) {
@@ -72,6 +74,121 @@ module.exports = class WebProxyApp extends Homey.App {
         data: ''
       };
     }
+  }
+
+  async wsConnect(url, wsId, homey) {
+    try {
+      if (this.websockets.has(wsId)) {
+        throw new Error('WebSocket ID already in use');
+      }
+
+      const ws = new WebSocket(url);
+
+      ws.on('open', () => {
+        this.log(`WebSocket ${wsId} connected to ${url}`);
+        if (homey) {
+          this.homey.api.realtime(`ws:${wsId}:open`, {});
+        }
+      });
+
+      ws.on('message', (data) => {
+        // Convert message to base64 for transmission
+        let base64Data;
+        if (Buffer.isBuffer(data)) {
+          base64Data = data.toString('base64');
+        } else if (typeof data === 'string') {
+          base64Data = Buffer.from(data).toString('base64');
+        } else {
+          base64Data = Buffer.from(String(data)).toString('base64');
+        }
+
+        this.homey.api.realtime(`ws:${wsId}:message`, {
+          data: base64Data,
+          isBinary: Buffer.isBuffer(data)
+        });
+      });
+
+      ws.on('error', (error) => {
+        this.error(`WebSocket ${wsId} error:`, error);
+        this.homey.api.realtime(`ws:${wsId}:error`, {
+          error: error.message
+        });
+      });
+
+      ws.on('close', (code, reason) => {
+        this.log(`WebSocket ${wsId} closed:`, code, reason);
+        this.websockets.delete(wsId);
+        this.homey.api.realtime(`ws:${wsId}:close`, {
+            code,
+            reason: reason.toString()
+        });
+      });
+
+      this.websockets.set(wsId, ws);
+
+      return {
+        success: true,
+        wsId
+      };
+    } catch (error) {
+      this.error('WebSocket connection error:', error);
+      throw error;
+    }
+  }
+
+  async wsSend(wsId, data) {
+    try {
+      const ws = this.websockets.get(wsId);
+      if (!ws) {
+        throw new Error('WebSocket not found');
+      }
+
+      if (ws.readyState !== WebSocket.OPEN) {
+        throw new Error('WebSocket is not open');
+      }
+
+      // Data comes as base64, decode it before sending
+      const buffer = Buffer.from(data, 'base64');
+      ws.send(buffer);
+
+      return {
+        success: true
+      };
+    } catch (error) {
+      this.error('WebSocket send error:', error);
+      throw error;
+    }
+  }
+
+  async wsClose(wsId) {
+    try {
+      const ws = this.websockets.get(wsId);
+      if (!ws) {
+        throw new Error('WebSocket not found');
+      }
+
+      ws.close();
+      this.websockets.delete(wsId);
+
+      return {
+        success: true
+      };
+    } catch (error) {
+      this.error('WebSocket close error:', error);
+      throw error;
+    }
+  }
+
+    async onUninit() {
+    // Close all WebSocket connections when app is uninitialized
+    for (const [wsId, ws] of this.websockets.entries()) {
+      try {
+        ws.close();
+      } catch (error) {
+        this.error(`Error closing WebSocket ${wsId}:`, error);
+      }
+    }
+    this.websockets.clear();
   }
 
 };

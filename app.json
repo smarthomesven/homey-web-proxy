@@ -53,6 +53,18 @@
         "webRequest": {
           "method": "POST",
           "path": "/request"
+        },
+        "wsConnect": {
+          "method": "POST",
+          "path": "/ws_connect"
+        },
+        "wsSend": {
+          "method": "POST",
+          "path": "/ws_send"
+        },
+        "wsClose": {
+          "method": "POST",
+          "path": "/ws_close"
         }
       },
       "id": "webframe"

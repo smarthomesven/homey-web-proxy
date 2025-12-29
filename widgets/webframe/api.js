@@ -15,4 +15,46 @@ module.exports = {
       };
     }
   },
+
+  async wsConnect({ homey, body }) {
+    try {
+      const { url, wsId } = body;
+      const result = await homey.app.wsConnect(url, wsId, homey);
+      return result;
+    } catch (error) {
+      homey.error('WebSocket connect error:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  },
+
+  async wsSend({ homey, body }) {
+    try {
+      const { wsId, data } = body;
+      const result = await homey.app.wsSend(wsId, data);
+      return result;
+    } catch (error) {
+      homey.error('WebSocket send error:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  },
+
+  async wsClose({ homey, body }) {
+    try {
+      const { wsId } = body;
+      const result = await homey.app.wsClose(wsId);
+      return result;
+    } catch (error) {
+      homey.error('WebSocket close error:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
 };

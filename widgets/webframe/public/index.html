@@ -58,6 +58,13 @@
         const loading = document.querySelector('.loading');
         const statusEl = document.getElementById('status');
         
+        // WebSocket state management
+        const wsConnections = new Map();
+        let wsIdCounter = 0;
+        
+        // Expose wsConnections to iframe
+        window.wsConnections = wsConnections;
+
         function updateStatus(msg) {
           console.log(msg);
           statusEl.textContent = msg;
@@ -89,6 +96,74 @@
             return result;
           } catch (err) {
             console.error('Homey API error:', err);
+            throw err;
+          }
+        }
+
+        // WebSocket proxy functions
+        async function wsConnect(wsUrl, wsId) {
+          console.log('Connecting WebSocket:', wsUrl, 'with ID:', wsId);
+          
+          try {
+            const result = await Homey.api("POST", "/ws_connect", {
+              url: wsUrl,
+              wsId: wsId
+            });
+            
+            if (!result.success) {
+              throw new Error(result.error || 'WebSocket connection failed');
+            }
+            
+            return result;
+          } catch (err) {
+            console.error('WebSocket connect error:', err);
+            throw err;
+          }
+        }
+
+        async function wsSend(wsId, data) {
+          try {
+            // Convert data to base64
+            let base64Data;
+            if (data instanceof ArrayBuffer) {
+              const uint8Array = new Uint8Array(data);
+              base64Data = btoa(String.fromCharCode.apply(null, uint8Array));
+            } else if (data instanceof Blob) {
+              // For blobs, we need to read them first
+              const arrayBuffer = await data.arrayBuffer();
+              const uint8Array = new Uint8Array(arrayBuffer);
+              base64Data = btoa(String.fromCharCode.apply(null, uint8Array));
+            } else if (typeof data === 'string') {
+              base64Data = btoa(unescape(encodeURIComponent(data)));
+            } else {
+              base64Data = btoa(String(data));
+            }
+
+            const result = await Homey.api("POST", "/ws_send", {
+              wsId: wsId,
+              data: base64Data
+            });
+            
+            if (!result.success) {
+              throw new Error(result.error || 'WebSocket send failed');
+            }
+            
+            return result;
+          } catch (err) {
+            console.error('WebSocket send error:', err);
+            throw err;
+          }
+        }
+
+        async function wsClose(wsId) {
+          try {
+            const result = await Homey.api("POST", "/ws_close", {
+              wsId: wsId
+            });
+            
+            return result;
+          } catch (err) {
+            console.error('WebSocket close error:', err);
             throw err;
           }
         }
@@ -376,12 +451,250 @@
           }
         };
 
+        // Expose WebSocket proxy for iframe
+        window.handleProxyWebSocket = async function(wsUrl) {
+          const wsId = `ws_${wsIdCounter++}`;
+          console.log('Creating proxied WebSocket:', wsUrl, 'with ID:', wsId);
+          
+          // Set up event listeners for this specific WebSocket
+          setupWebSocketListener(wsId);
+          
+          try {
+            await wsConnect(wsUrl, wsId);
+            return { success: true, wsId };
+          } catch (error) {
+            console.error('WebSocket proxy error:', error);
+            return { success: false, error: error.message };
+          }
+        };
+
+        window.handleProxyWebSocketSend = async function(wsId, data) {
+          return await wsSend(wsId, data);
+        };
+
+        window.handleProxyWebSocketClose = async function(wsId) {
+          const conn = wsConnections.get(wsId);
+          if (conn) {
+            wsConnections.delete(wsId);
+          }
+          return await wsClose(wsId);
+        };
+
+        // Set up WebSocket event listeners dynamically
+        function setupWebSocketListener(wsId) {
+          console.log('Setting up event listeners for:', wsId);
+          
+          Homey.on(`ws:${wsId}:open`, (data) => {
+            console.log('WebSocket opened:', wsId);
+            
+            const conn = wsConnections.get(wsId);
+            if (conn) {
+              conn.readyState = 1; // OPEN
+              if (conn._onopen) {
+                conn._onopen({});
+              }
+            }
+          });
+
+          Homey.on(`ws:${wsId}:message`, (data) => {
+            console.log('WebSocket message received:', wsId, data);
+            
+            const conn = wsConnections.get(wsId);
+            if (conn && conn.onmessage) {
+              try {
+                // Decode base64 data
+                const binaryString = atob(data.data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                  bytes[i] = binaryString.charCodeAt(i);
+                }
+                
+                let messageData;
+                
+                // WebSocket servers often send text as binary frames
+                // Try to decode as UTF-8 text first
+                try {
+                  const decoder = new TextDecoder('utf-8', { fatal: true });
+                  messageData = decoder.decode(bytes);
+                  console.log('Decoded as text:', messageData);
+                } catch (e) {
+                  // If UTF-8 decode fails, treat as binary
+                  if (conn.binaryType === 'blob') {
+                    messageData = new Blob([bytes]);
+                  } else {
+                    messageData = bytes.buffer;
+                  }
+                  console.log('Decoded as binary:', messageData);
+                }
+                
+                // Create proper MessageEvent-like object
+                const messageEvent = {
+                  data: messageData,
+                  type: 'message',
+                  target: conn,
+                  currentTarget: conn
+                };
+                
+                conn.onmessage(messageEvent);
+              } catch (error) {
+                console.error('Error decoding WebSocket message:', error);
+              }
+            }
+          });
+
+          Homey.on(`ws:${wsId}:error`, (data) => {
+            console.error('WebSocket error:', wsId, data.error);
+            
+            const conn = wsConnections.get(wsId);
+            if (conn && conn.onerror) {
+              conn.onerror(new Error(data.error));
+            }
+          });
+
+          Homey.on(`ws:${wsId}:close`, (data) => {
+            console.log('WebSocket closed:', wsId, data.code, data.reason);
+            
+            const conn = wsConnections.get(wsId);
+            if (conn) {
+              conn.readyState = 3; // CLOSED
+              if (conn._onclose) {
+                conn._onclose({ code: data.code, reason: data.reason });
+              }
+            }
+            wsConnections.delete(wsId);
+          });
+        }
+
         function injectProxyIntoHtml(html, baseUrl) {
           const proxyScript = `
             <script>
             (function() {
               console.log('Proxy script initializing...');
               const baseUrl = '${baseUrl.replace(/'/g, "\\'")}';
+              
+              // Store WebSocket connections
+              const wsConnections = new Map();
+              
+              // Override WebSocket constructor
+              const OriginalWebSocket = window.WebSocket;
+              window.WebSocket = function(url, protocols) {
+                console.log('Intercepted WebSocket constructor:', url);
+                
+                // Make URL absolute
+                let absoluteUrl;
+                try {
+                  absoluteUrl = new URL(url, baseUrl).href;
+                } catch (e) {
+                  console.error('Failed to parse WebSocket URL:', url, e);
+                  absoluteUrl = url;
+                }
+                
+                // Create a fake WebSocket object
+                const fakeWs = {
+                  url: absoluteUrl,
+                  readyState: 0, // CONNECTING
+                  bufferedAmount: 0,
+                  extensions: '',
+                  protocol: '',
+                  binaryType: 'blob',
+                  onopen: null,
+                  onmessage: null,
+                  onerror: null,
+                  onclose: null,
+                  CONNECTING: 0,
+                  OPEN: 1,
+                  CLOSING: 2,
+                  CLOSED: 3
+                };
+                
+                // Connect through parent proxy
+                (async () => {
+                  try {
+                    const result = await window.parent.handleProxyWebSocket(absoluteUrl);
+                    
+                    if (!result.success) {
+                      throw new Error(result.error || 'WebSocket connection failed');
+                    }
+                    
+                    fakeWs.wsId = result.wsId;
+                    
+                    // Store reference in parent for event handling
+                    if (window.parent.wsConnections) {
+                      window.parent.wsConnections.set(result.wsId, fakeWs);
+                    }
+                    
+                    // State will be updated when 'open' event is received
+                  } catch (error) {
+                    console.error('WebSocket connection error:', error);
+                    fakeWs.readyState = 3; // CLOSED
+                    if (fakeWs.onerror) {
+                      setTimeout(() => fakeWs.onerror(error), 0);
+                    }
+                  }
+                })();
+                
+                // Implement send method
+                fakeWs.send = async function(data) {
+                  if (this.readyState !== 1) { // OPEN
+                    throw new Error('WebSocket is not open');
+                  }
+                  
+                  try {
+                    await window.parent.handleProxyWebSocketSend(this.wsId, data);
+                  } catch (error) {
+                    console.error('WebSocket send error:', error);
+                    if (this.onerror) {
+                      this.onerror(error);
+                    }
+                  }
+                };
+                
+                // Implement close method
+                fakeWs.close = async function(code, reason) {
+                  if (this.readyState === 2 || this.readyState === 3) {
+                    return; // Already closing or closed
+                  }
+                  
+                  this.readyState = 2; // CLOSING
+                  
+                  try {
+                    await window.parent.handleProxyWebSocketClose(this.wsId);
+                  } catch (error) {
+                    console.error('WebSocket close error:', error);
+                  }
+                };
+                
+                // Override onopen setter to update readyState
+                Object.defineProperty(fakeWs, 'onopen', {
+                  get: function() { return this._onopen; },
+                  set: function(handler) {
+                    this._onopen = function(event) {
+                      fakeWs.readyState = 1; // OPEN
+                      if (handler) handler.call(fakeWs, event);
+                    };
+                  }
+                });
+                
+                // Override onclose setter to update readyState
+                Object.defineProperty(fakeWs, 'onclose', {
+                  get: function() { return this._onclose; },
+                  set: function(handler) {
+                    this._onclose = function(event) {
+                      fakeWs.readyState = 3; // CLOSED
+                      wsConnections.delete(fakeWs.wsId);
+                      if (handler) handler.call(fakeWs, event);
+                    };
+                  }
+                });
+                
+                return fakeWs;
+              };
+              
+              // Copy static properties
+              window.WebSocket.CONNECTING = 0;
+              window.WebSocket.OPEN = 1;
+              window.WebSocket.CLOSING = 2;
+              window.WebSocket.CLOSED = 3;
               
               // Override fetch to use parent's proxy
               const originalFetch = window.fetch;
