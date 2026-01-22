@@ -598,6 +598,10 @@
         }
 
         function injectProxyIntoHtml(html, baseUrl) {
+          // Add a <base> tag to set the base URL for the document
+          // This helps libraries like Socket.io construct correct URLs
+          const baseTag = `<base href="${baseUrl.replace(/"/g, '&quot;')}">`;
+          
           // Remove or modify resource URLs in the HTML before browser parses it
           // This prevents 404 errors during initial load
           
@@ -631,6 +635,13 @@
               
               // Parse base URL
               const baseUrlObj = new URL(baseUrl);
+              console.log('Base URL:', baseUrl);
+              console.log('Base URL object:', {
+                origin: baseUrlObj.origin,
+                pathname: baseUrlObj.pathname,
+                host: baseUrlObj.host,
+                hostname: baseUrlObj.hostname
+              });
               
               // Override location to make scripts think they're on the original server
               const originalLocation = window.location;
@@ -760,6 +771,49 @@
               // Copy static properties
               window.Image.prototype = OriginalImage.prototype;
               
+              // Override the URL constructor to fix aboutsrcdoc URLs automatically
+              const OriginalURL = window.URL;
+              window.URL = function(url, base) {
+                // Fix URLs that contain aboutsrcdoc BEFORE creating the URL object
+                let fixedUrl = url;
+                if (typeof url === 'string' && url.includes('aboutsrcdoc')) {
+                  console.log('URL constructor input:', url);
+                  try {
+                    const tempUrl = new OriginalURL(url);
+                    const hostname = tempUrl.hostname;
+                    
+                    if (hostname.startsWith('aboutsrcdoc')) {
+                      const socketPath = hostname.substring('aboutsrcdoc'.length);
+                      const basePath = baseUrlObj.pathname.endsWith('/') 
+                        ? baseUrlObj.pathname 
+                        : baseUrlObj.pathname.substring(0, baseUrlObj.pathname.lastIndexOf('/') + 1);
+                      
+                      let extractedPath = basePath + socketPath;
+                      if (!extractedPath.endsWith('/')) {
+                        extractedPath += '/';
+                      }
+                      
+                      const queryAndHash = tempUrl.search + tempUrl.hash;
+                      fixedUrl = baseUrlObj.origin + extractedPath + queryAndHash;
+                      console.log('URL constructor fixed aboutsrcdoc URL to:', fixedUrl);
+                    }
+                  } catch (e) {
+                    console.error('URL constructor fix error:', e);
+                  }
+                }
+                
+                // Call original constructor with fixed URL
+                if (base !== undefined) {
+                  return new OriginalURL(fixedUrl, base);
+                } else {
+                  return new OriginalURL(fixedUrl);
+                }
+              };
+              
+              // Copy static methods
+              window.URL.createObjectURL = OriginalURL.createObjectURL;
+              window.URL.revokeObjectURL = OriginalURL.revokeObjectURL;
+              
               // Override HTMLImageElement.prototype.src for all img elements
               const originalSrcDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
               if (originalSrcDescriptor && originalSrcDescriptor.configurable) {
@@ -828,6 +882,42 @@
               const OriginalWebSocket = window.WebSocket;
               window.WebSocket = function(url, protocols) {
                 console.log('Intercepted WebSocket constructor:', url);
+                
+                // Fix malformed URLs that might have been constructed using about:srcdoc
+                if (typeof url === 'string' && url.includes('aboutsrcdoc')) {
+                  console.warn('Detected malformed WebSocket URL with aboutsrcdoc:', url);
+                  try {
+                    const urlObj = new URL(url);
+                    
+                    // Extract the path from the malformed hostname
+                    const hostname = urlObj.hostname;
+                    let extractedPath = '';
+                    
+                    if (hostname.startsWith('aboutsrcdoc')) {
+                      const socketPath = hostname.substring('aboutsrcdoc'.length);
+                      
+                      // Get the directory path from the base URL
+                      const basePath = baseUrlObj.pathname.endsWith('/') 
+                        ? baseUrlObj.pathname 
+                        : baseUrlObj.pathname.substring(0, baseUrlObj.pathname.lastIndexOf('/') + 1);
+                      
+                      // Combine base path with socket path
+                      extractedPath = basePath + socketPath;
+                      
+                      // Socket.io typically needs a trailing slash
+                      if (!extractedPath.endsWith('/')) {
+                        extractedPath += '/';
+                      }
+                    }
+                    
+                    const queryAndHash = urlObj.search + urlObj.hash;
+                    const protocol = baseUrlObj.protocol === 'https:' ? 'wss:' : 'ws:';
+                    url = protocol + '//' + baseUrlObj.host + extractedPath + queryAndHash;
+                    console.log('Fixed WebSocket URL to:', url);
+                  } catch (e) {
+                    console.error('Could not fix malformed WebSocket URL:', url, e);
+                  }
+                }
                 
                 // Make URL absolute
                 let absoluteUrl;
@@ -951,7 +1041,14 @@
                 const url = typeof resource === 'string' ? resource : resource.url;
                 let absoluteUrl;
                 try {
-                  absoluteUrl = new URL(url, baseUrl).href;
+                  // Use the fake location's origin for relative URLs
+                  if (url.startsWith('/')) {
+                    absoluteUrl = baseUrlObj.origin + url;
+                  } else if (url.startsWith('http://') || url.startsWith('https://')) {
+                    absoluteUrl = url;
+                  } else {
+                    absoluteUrl = new URL(url, baseUrl).href;
+                  }
                 } catch (e) {
                   console.error('Failed to parse URL:', url, e);
                   absoluteUrl = url;
@@ -1043,7 +1140,23 @@
                 
                 xhr.open = function(method, url, ...args) {
                   requestMethod = method;
+                  
+                  // Fix malformed URLs that might have been constructed using about:srcdoc
+                  if (typeof url === 'string' && url.includes('aboutsrcdoc')) {
+  console.warn('XHR.open: Detected malformed URL with aboutsrcdoc:', url);
+  try {
+    // Use the overridden URL constructor which will fix it
+    const urlObj = new window.URL(url);
+    console.log('XHR.open: urlObj.href=', urlObj.href);
+    url = urlObj.href;
+    console.log('XHR.open: Final fixed URL:', url);
+  } catch (e) {
+    console.error('Could not fix malformed URL:', url, e);
+  }
+}
+                  
                   requestUrl = url;
+                  console.log('XHR.open called with:', method, url);
                   
                   // Don't actually open the real XHR
                   return;
@@ -1057,8 +1170,16 @@
                   try {
                     let absoluteUrl;
                     try {
-                      absoluteUrl = new URL(requestUrl, baseUrl).href;
+                      // Use the fake location's origin for relative URLs
+                      if (requestUrl.startsWith('/')) {
+                        absoluteUrl = baseUrlObj.origin + requestUrl;
+                      } else if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://')) {
+                        absoluteUrl = requestUrl;
+                      } else {
+                        absoluteUrl = new URL(requestUrl, baseUrl).href;
+                      }
                     } catch (e) {
+                      console.error('Failed to construct absolute URL from:', requestUrl, e);
                       absoluteUrl = requestUrl;
                     }
                     
@@ -1449,15 +1570,15 @@
             })();
             </` + `script>`;
           
-          // Inject script at the beginning of head or body
+          // Inject base tag and script at the beginning of head
           if (html.includes('<head>')) {
-            return html.replace('<head>', '<head>' + proxyScript);
+            return html.replace('<head>', '<head>' + baseTag + proxyScript);
           } else if (html.includes('</head>')) {
-            return html.replace('</head>', proxyScript + '</head>');
+            return html.replace('</head>', baseTag + proxyScript + '</head>');
           } else if (html.includes('<body')) {
-            return html.replace(/<body([^>]*)>/, '<body$1>' + proxyScript);
+            return html.replace(/<body([^>]*)>/, baseTag + '<body$1>' + proxyScript);
           } else {
-            return proxyScript + html;
+            return baseTag + proxyScript + html;
           }
         }
 
