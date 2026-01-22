@@ -28,5 +28,8 @@
   },
   "1.1.1": {
     "en": "Added support for dynamic script loading"
+  },
+  "1.1.2": {
+    "en": "Fixed URL constructor, added redirect and cookie support"
   }
 }
