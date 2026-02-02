@@ -1038,7 +1038,7 @@
                 const url = typeof resource === 'string' ? resource : resource.url;
                 console.log('URL before processing: ', url);
                 let absoluteUrl;
-                let cleanedUrl;
+                let cleanedUrl = url;
                 if (url.startsWith('null/')) {
                   cleanedUrl = url.replace('null','');
                 }
