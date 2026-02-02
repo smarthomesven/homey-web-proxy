@@ -421,7 +421,6 @@
             }
           }
           
-          // Load scripts
           const scripts = iframe.contentDocument.querySelectorAll('script[data-proxy-src]');
           console.log('Found', scripts.length, 'scripts to load');
           for (let i = 0; i < scripts.length; i++) {
@@ -457,8 +456,7 @@
               console.error('Failed to load script:', scriptUrl, error);
             }
           }
-          
-          console.log('Finished loading resources');
+          console.log('Resource loading complete');
         }
 
         // Expose fetch proxy for iframe
@@ -605,7 +603,6 @@
           // Remove or modify resource URLs in the HTML before browser parses it
           // This prevents 404 errors during initial load
           
-          // Replace script src with data-proxy-src
           html = html.replace(/<script([^>]*)\ssrc=["']([^"']+)["']/gi, (match, attrs, src) => {
             return `<script${attrs} data-proxy-src="${src}"`;
           });
