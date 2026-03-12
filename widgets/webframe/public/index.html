@@ -47,6 +47,8 @@
     <script type="text/javascript">
       function onHomeyReady(Homey) {
         Homey.ready();
+        const height = Homey.getSettings().height || 400;
+        Homey.setHeight(height);
 
         const url = Homey.getSettings().url;
         if (!url) {
@@ -459,6 +461,16 @@
           console.log('Resource loading complete');
         }
 
+        window.setHostname = function(host) {
+          console.log('Setting hostname in iframe:', host);
+          this._hostname = host;
+        };
+        window.handleAlert = function(message) {
+          const result = Homey.popup("https://smarthomesven.github.io/web-proxy-html/alert.html?m=" + encodeURIComponent(message) + "&w=" + encodeURIComponent(this._hostname || "Website"));
+          return result;
+        };
+
+
         // Expose fetch proxy for iframe
         window.handleProxyFetch = async function(url, method, headers, body) {
           console.log('Handling proxy fetch:', url);
@@ -639,6 +651,7 @@
                 host: baseUrlObj.host,
                 hostname: baseUrlObj.hostname
               });
+              window.parent.setHostname(baseUrlObj.host);
               
               // Override location to make scripts think they're on the original server
               const originalLocation = window.location;
@@ -1031,6 +1044,15 @@
               window.WebSocket.OPEN = 1;
               window.WebSocket.CLOSING = 2;
               window.WebSocket.CLOSED = 3;
+
+              const originalAlert = window.alert;
+              window.alert = function(message) {
+                console.log('Alert dialog intercepted:', message);
+                if (window.parent && window.parent.handleAlert) {
+                  return window.parent.handleAlert(message);
+                }
+                return originalAlert(message);
+              };
               
               // Override fetch to use parent's proxy
               const originalFetch = window.fetch;

@@ -47,6 +47,16 @@
           "title": {
             "en": "URL"
           }
+        },
+        {
+          "id": "height",
+          "type": "number",
+          "title": {
+            "en": "Height"
+          },
+          "value": 400,
+          "min": 0,
+          "max": 9999999
         }
       ],
       "api": {
