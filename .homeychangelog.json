@@ -40,5 +40,8 @@
   },
   "1.1.5": {
     "en": "Added custom height setting, updated dependencies and added support for alert() calls"
+  },
+  "1.1.6": {
+    "en": "Added telemetry"
   }
 }
