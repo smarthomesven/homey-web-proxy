@@ -26,7 +26,7 @@ class WebProxyApp extends Homey.App {
       }
       await axios.post('https://homey-apps-telemetry.vercel.app/api/installations', {
         id: id,
-        appId: "com.zyxel.nebula",
+        appId: "nl.dypodex.proxy",
         homeyPlatform: this.homey.platformVersion ? this.homey.platformVersion : 1,
         appVersion: this.manifest.version,
       }).catch(error => {
