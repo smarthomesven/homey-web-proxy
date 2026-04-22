@@ -46,5 +46,8 @@
   },
   "1.1.7": {
     "en": "Fix issue"
+  },
+  "1.1.8": {
+    "en": "Update dependencies"
   }
 }
