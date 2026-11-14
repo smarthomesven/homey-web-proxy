@@ -79,5 +79,8 @@
   },
   "1.1.18": {
     "en": "Added Push SDK"
+  },
+  "1.1.19": {
+    "en": "Update dependencies"
   }
 }
